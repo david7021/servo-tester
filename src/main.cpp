@@ -30,14 +30,12 @@
 #define BTN_PIN 5
 
 #define SERVO_PIN 3 // Servo control pin
-#define SERVO_MIN 600
-#define SERVO_MAX 2400
 
 enum Mode {
     MODE_MANUAL,
     MODE_SWEEP,
     MODE_CENTER,
-    MODE_RANGE_SELECT,
+    MODE_CALIBRATE,
 };
 
 Mode currentMode = MODE_MANUAL;
@@ -76,6 +74,18 @@ unsigned long lastPressTime = 0;
 unsigned long debounceDelay = 50;
 unsigned long buttonPressTime = 0;
 
+uint16_t angle = 0; // Current angle for display
+uint16_t potValue = 0; // Current potentiometer 
+
+unsigned long sweepInterval = 15;
+
+uint16_t servoMax = 2400; // Maximum servo pulse width
+uint16_t servoMin = 600; // Minimum servo pulse width
+
+uint16_t currentRange = 180;
+
+bool isChoosingCalibrationSlot = false;
+
 //TODO:
 // + Button resets whole system I think
 
@@ -100,33 +110,43 @@ void setup() {
 
     servo1.attach(SERVO_PIN);
     servo1.writeMicroseconds(1500); // Initialize servo to middle position
+
+    currentMode = MODE_MANUAL; // Start in manual mode
 }
 
-uint16_t lastMicros = 0;
-
 void loop() {
-    int rawPotValue = readAveragedPotValue(8);
-    uint16_t targetMicros = map(rawPotValue, 0, 1023, SERVO_MIN, SERVO_MAX);
+    potValue = readAveragedPotValue(8); // Read potentiometer value
 
-    if(lastMicros < targetMicros) {
-        lastMicros += min(10, targetMicros - lastMicros); // Increment towards target
-    }else if(lastMicros > targetMicros) {
-        lastMicros -= min(10, lastMicros - targetMicros); // Decrement towards target
+    handleModes();
+
+    uint16_t h;
+    uint16_t t;
+    uint16_t o;
+
+    if(currentMode == MODE_SWEEP) {
+        h = sweepInterval / 100;
+        t = (sweepInterval / 10) % 10;
+        o = sweepInterval % 10;
+
+        displayDigit('0' + o, 2);
+        delay(4);
+        displayDigit((sweepInterval >= 10) ? ('0' + t) : ' ', 1);
+        delay(4);
+        displayDigit((sweepInterval >= 100) ? ('0' + h) : ' ', 0);
+        delay(4);
+    }else {
+        uint16_t angle = map(servo1.readMicroseconds(), servoMin, servoMax, 0, 180); // inverted the mapping to match the potentiometer
+        uint16_t h = angle / 100;
+        uint16_t t = (angle / 10) % 10;
+        uint16_t o = angle % 10;
+
+        displayDigit('0' + o, 2);
+        delay(4);
+        displayDigit((angle >= 10) ? ('0' + t) : ' ', 1);
+        delay(4);
+        displayDigit((angle >= 100) ? ('0' + h) : ' ', 0);
+        delay(4);
     }
-
-    /**servo1.writeMicroseconds(lastMicros);
-    
-    uint16_t angle = map(lastMicros, SERVO_MIN, SERVO_MAX, 0, 180); // inverted the mapping to match the potentiometer
-    uint16_t h = angle / 100;
-    uint16_t t = (angle / 10) % 10;
-    uint16_t o = angle % 10;
-
-    displayDigit('0' + o, 2);
-    delay(4);
-    displayDigit((angle >= 10) ? ('0' + t) : ' ', 1);
-    delay(4);
-    displayDigit((angle >= 100) ? ('0' + h) : ' ', 0);
-    delay(4);**/
 
     if(digitalRead(BTN_PIN) != lastButtonState) {
         lastDebounceTime = millis();
@@ -158,11 +178,79 @@ void loop() {
     }
 
     if(awaitingDoublePress && (millis() - lastPressTime > doublePressWindow)) {
-        currentMode = MODE_RANGE_SELECT;
+        currentMode = MODE_CALIBRATE;
+        isChoosingCalibrationSlot = true;
         awaitingDoublePress = false;
     }
 
     lastButtonState = digitalRead(BTN_PIN);
+}
+
+void handleModes() {
+    static uint16_t lastPotValue = potValue;
+
+    switch (currentMode)
+    {
+        case MODE_MANUAL: {
+            uint16_t lastMicros = servo1.readMicroseconds();
+            uint16_t targetMicros = map(potValue, 1023, 0, servoMin, servoMax);
+
+            if(lastMicros < targetMicros) {
+                lastMicros += min(10, targetMicros - lastMicros); // Increment towards target
+            }else if(lastMicros > targetMicros) {
+                lastMicros -= min(10, lastMicros - targetMicros); // Decrement towards target
+            }
+
+            servo1.writeMicroseconds(lastMicros);
+            break;
+        }
+
+        case MODE_SWEEP: {
+            static bool sweepingRight = true;
+            static uint16_t sweepMicros = servoMin;
+            static unsigned long lastSweepTime = 0;
+
+            if(abs((int)potValue - (int)lastPotValue) > 5) {
+                sweepInterval = map(potValue, 1023, 0, 5, 50); // Adjust sweep speed based on pot value
+                lastPotValue = potValue;
+            }
+
+            if(millis() - lastSweepTime >= sweepInterval) {
+                lastSweepTime = millis();
+
+                if(sweepingRight) {
+                    sweepMicros += 10; // Increment towards max
+                    if(sweepMicros >= servoMax) {
+                        sweepMicros = servoMax;
+                        sweepingRight = false; // Change direction
+                    }
+                }else {
+                    sweepMicros -= 10; // Decrement towards min
+                    if(sweepMicros <= servoMin) {
+                        sweepMicros = servoMin;
+                        sweepingRight = true; // Change direction
+                    }
+                }
+
+                servo1.writeMicroseconds(sweepMicros);
+            }
+            break;
+        }
+
+        case MODE_CALIBRATE: {
+            
+            break;
+        }
+
+        case MODE_CENTER: {
+            servo1.writeMicroseconds((servoMax-servoMin) / 2); // Center the servo
+            break;
+        }
+        
+        default: {
+            break;
+        }
+    }
 }
 
 void displayDigit(char digit, uint8_t digitIndex) {
