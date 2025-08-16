@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <Servo.h>
+#include <EEPROM.h>
 
 // ATMEL ATTINY84 / ARDUINO
 //
@@ -48,17 +49,19 @@ const uint8_t SEG_E = 0b01000000;
 const uint8_t SEG_F = 0b00000010;
 const uint8_t SEG_G = 0b00001000;
 
-const uint8_t digitMap[10] = {
-  SEG_A | SEG_B | SEG_C | SEG_D | SEG_E | SEG_F,             // '0'
-  SEG_B | SEG_C,                                             // '1'
-  SEG_A | SEG_B | SEG_D | SEG_E | SEG_G,                     // '2'
-  SEG_A | SEG_B | SEG_C | SEG_D | SEG_G,                     // '3'
-  SEG_B | SEG_C | SEG_F | SEG_G,                             // '4'
-  SEG_A | SEG_C | SEG_D | SEG_F | SEG_G,                     // '5'
-  SEG_A | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G,             // '6'
-  SEG_A | SEG_B | SEG_C,                                     // '7'
-  SEG_A | SEG_B | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G,     // '8'
-  SEG_A | SEG_B | SEG_C | SEG_D | SEG_F | SEG_G              // '9'
+const uint8_t digitMap[12] = {
+    SEG_A | SEG_B | SEG_C | SEG_D | SEG_E | SEG_F,             // '0'
+    SEG_B | SEG_C,                                             // '1'
+    SEG_A | SEG_B | SEG_D | SEG_E | SEG_G,                     // '2'
+    SEG_A | SEG_B | SEG_C | SEG_D | SEG_G,                     // '3'
+    SEG_B | SEG_C | SEG_F | SEG_G,                             // '4'
+    SEG_A | SEG_C | SEG_D | SEG_F | SEG_G,                     // '5'
+    SEG_A | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G,             // '6'
+    SEG_A | SEG_B | SEG_C,                                     // '7'
+    SEG_A | SEG_B | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G,     // '8'
+    SEG_A | SEG_B | SEG_C | SEG_D | SEG_F | SEG_G,             // '9'
+    SEG_A | SEG_D | SEG_E | SEG_F,                             // 'C'
+    SEG_G,                                                     // '-'
 };
 
 Servo servo1;
@@ -74,25 +77,29 @@ unsigned long lastPressTime = 0;
 unsigned long debounceDelay = 50;
 unsigned long buttonPressTime = 0;
 
-uint16_t angle = 0; // Current angle for display
 uint16_t potValue = 0; // Current potentiometer 
 
 unsigned long sweepInterval = 15;
 
-uint16_t servoMax = 2400; // Maximum servo pulse width
-uint16_t servoMin = 600; // Minimum servo pulse width
+uint16_t servoMax[] = {2400, 2400, 2400}; // Maximum servo pulse width
+uint16_t servoMin[] = {600, 600, 600}; // Minimum servo pulse width
+bool awaitingServoMin = false;
+bool awaitingServoMax = false;
+uint8_t servoMinMaxSlot = 0; // 0 for slot1, 1 for slot2, 2 for slot3
 
-uint16_t currentRange = 180;
-
-bool isChoosingCalibrationSlot = false;
-
-//TODO:
-// + Button resets whole system I think
+uint16_t lastPotValue = -1;
 
 // Function prototypes
+void displaySaved();
 void displayDigit(char digit, uint8_t digitIndex = 0);
 uint16_t readAveragedPotValue(uint8_t samples);
 void handleModes();
+void outputBits(uint8_t bits);
+void loadServoCalibration();
+void saveServoCalibration();
+void displayDigits(char digit1, char digit2 = ' ', char digit3 = ' ');
+bool rotatedPot();
+void displayNumber(uint8_t num);
 
 void setup() {
     pinMode(DIGIT_1_PIN, OUTPUT);
@@ -107,45 +114,33 @@ void setup() {
     digitalWrite(DIGIT_1_PIN, HIGH);
     digitalWrite(DIGIT_2_PIN, LOW);
     digitalWrite(DIGIT_3_PIN, LOW);
-
-    servo1.attach(SERVO_PIN);
-    servo1.writeMicroseconds(1500); // Initialize servo to middle position
-
-    currentMode = MODE_MANUAL; // Start in manual mode
+    
+    servo1.attach(SERVO_PIN, 400, 2600); // Attach servo with min/max pulse width
+    loadServoCalibration(); // Load saved servo calibration values
 }
 
 void loop() {
+    uint16_t rawPotValue = analogRead(POT_PIN);
     potValue = readAveragedPotValue(8); // Read potentiometer value
 
     handleModes();
 
-    uint16_t h;
-    uint16_t t;
-    uint16_t o;
-
-    if(currentMode == MODE_SWEEP) {
-        h = sweepInterval / 100;
-        t = (sweepInterval / 10) % 10;
-        o = sweepInterval % 10;
-
-        displayDigit('0' + o, 2);
-        delay(4);
-        displayDigit((sweepInterval >= 10) ? ('0' + t) : ' ', 1);
-        delay(4);
-        displayDigit((sweepInterval >= 100) ? ('0' + h) : ' ', 0);
-        delay(4);
+    if(currentMode == MODE_CALIBRATE) {
+        if(!(awaitingServoMin || awaitingServoMax)) {
+            if(rawPotValue < 341) {
+                displayDigits('C', '1', ' ');
+            }else if(rawPotValue < 682) {
+                displayDigits('C', '2', ' ');
+            }else {
+                displayDigits('C', '3', ' ');
+            }
+        }
+    }else if(currentMode == MODE_SWEEP) {
+        displayNumber(sweepInterval);
     }else {
-        uint16_t angle = map(servo1.readMicroseconds(), servoMin, servoMax, 0, 180); // inverted the mapping to match the potentiometer
-        uint16_t h = angle / 100;
-        uint16_t t = (angle / 10) % 10;
-        uint16_t o = angle % 10;
+        uint16_t angle = map(servo1.readMicroseconds(), servoMin[servoMinMaxSlot], servoMax[servoMinMaxSlot], 0, 180);
 
-        displayDigit('0' + o, 2);
-        delay(4);
-        displayDigit((angle >= 10) ? ('0' + t) : ' ', 1);
-        delay(4);
-        displayDigit((angle >= 100) ? ('0' + h) : ' ', 0);
-        delay(4);
+        displayNumber(angle);
     }
 
     if(digitalRead(BTN_PIN) != lastButtonState) {
@@ -162,8 +157,14 @@ void loop() {
                 unsigned long pressDuration = millis() - buttonPressTime;
 
                 if(pressDuration >= longPressDuration) {
-                    currentMode = MODE_CENTER;
-                    awaitingDoublePress = false;
+                    if(currentMode == MODE_CALIBRATE) {
+                        servoMinMaxSlot = (rawPotValue < 341) ? 0 : (rawPotValue > 682) ? 1 : 2;
+                        displaySaved();
+                        currentMode = MODE_MANUAL;
+                    }else {
+                        currentMode = MODE_CENTER;
+                        awaitingDoublePress = false;
+                    }
                 }else {
                     if(awaitingDoublePress && (millis() - lastPressTime <= doublePressWindow)) {
                         currentMode = (currentMode == MODE_MANUAL) ? MODE_SWEEP : MODE_MANUAL;
@@ -178,22 +179,44 @@ void loop() {
     }
 
     if(awaitingDoublePress && (millis() - lastPressTime > doublePressWindow)) {
-        currentMode = MODE_CALIBRATE;
-        isChoosingCalibrationSlot = true;
+        if(currentMode == MODE_CALIBRATE) {
+            if(awaitingServoMin) {
+                servoMin[servoMinMaxSlot] = servo1.readMicroseconds();
+                awaitingServoMin = false;
+                awaitingServoMax = true;
+                displaySaved();
+            }else if(awaitingServoMax) {
+                servoMax[servoMinMaxSlot] = servo1.readMicroseconds();
+                awaitingServoMax = false;
+                saveServoCalibration();
+                displaySaved();
+                currentMode = MODE_MANUAL; // Exit calibration mode after saving
+            }else if(rawPotValue < 341 || rawPotValue > 682 || rawPotValue <= 1023) {
+                awaitingServoMin = true;
+                servoMinMaxSlot = (rawPotValue < 341) ? 0 : (rawPotValue > 682) ? 1 : 2;
+                servo1.detach(); // Detach servo during calibration
+                delay(50);
+                servo1.attach(SERVO_PIN, 400, 2600); // Reattach with current min/max
+            }
+        }else currentMode = MODE_CALIBRATE;
+
         awaitingDoublePress = false;
     }
 
     lastButtonState = digitalRead(BTN_PIN);
+    lastPotValue = potValue;
 }
 
-void handleModes() {
-    static uint16_t lastPotValue = potValue;
 
+uint16_t sweepMicros = servoMin[servoMinMaxSlot];
+bool sweepingRight = true;
+unsigned long lastSweepTime = 0;
+void handleModes() {
     switch (currentMode)
     {
         case MODE_MANUAL: {
             uint16_t lastMicros = servo1.readMicroseconds();
-            uint16_t targetMicros = map(potValue, 1023, 0, servoMin, servoMax);
+            uint16_t targetMicros = map(potValue, 0, 1023, servoMin[servoMinMaxSlot], servoMax[servoMinMaxSlot]);
 
             if(lastMicros < targetMicros) {
                 lastMicros += min(10, targetMicros - lastMicros); // Increment towards target
@@ -206,13 +229,8 @@ void handleModes() {
         }
 
         case MODE_SWEEP: {
-            static bool sweepingRight = true;
-            static uint16_t sweepMicros = servoMin;
-            static unsigned long lastSweepTime = 0;
-
-            if(abs((int)potValue - (int)lastPotValue) > 5) {
-                sweepInterval = map(potValue, 1023, 0, 5, 50); // Adjust sweep speed based on pot value
-                lastPotValue = potValue;
+            if(rotatedPot()) {
+                sweepInterval = map(potValue, 0, 1023, 5, 50); // Adjust sweep speed based on pot value
             }
 
             if(millis() - lastSweepTime >= sweepInterval) {
@@ -220,14 +238,14 @@ void handleModes() {
 
                 if(sweepingRight) {
                     sweepMicros += 10; // Increment towards max
-                    if(sweepMicros >= servoMax) {
-                        sweepMicros = servoMax;
+                    if(sweepMicros >= servoMax[servoMinMaxSlot]) {
+                        sweepMicros = servoMax[servoMinMaxSlot];
                         sweepingRight = false; // Change direction
                     }
                 }else {
                     sweepMicros -= 10; // Decrement towards min
-                    if(sweepMicros <= servoMin) {
-                        sweepMicros = servoMin;
+                    if(sweepMicros <= servoMin[servoMinMaxSlot]) {
+                        sweepMicros = servoMin[servoMinMaxSlot];
                         sweepingRight = true; // Change direction
                     }
                 }
@@ -238,12 +256,23 @@ void handleModes() {
         }
 
         case MODE_CALIBRATE: {
-            
+            if(awaitingServoMin || awaitingServoMax) {
+                uint16_t lastMicros = servo1.readMicroseconds();
+                uint16_t targetMicros = map(potValue, 0, 1023, 400, 2600);
+
+                if(lastMicros < targetMicros) {
+                    lastMicros += min(5, targetMicros - lastMicros); // Increment towards target
+                }else if(lastMicros > targetMicros) {
+                    lastMicros -= min(5, lastMicros - targetMicros); // Decrement towards target
+                }
+
+                servo1.writeMicroseconds(lastMicros);
+            }
             break;
         }
 
         case MODE_CENTER: {
-            servo1.writeMicroseconds((servoMax-servoMin) / 2); // Center the servo
+            servo1.write(90); // Center the servo
             break;
         }
         
@@ -253,24 +282,67 @@ void handleModes() {
     }
 }
 
+void saveServoCalibration() {
+    for (uint8_t i = 0; i < 3; i++) {
+        EEPROM.put(i * sizeof(uint16_t), servoMin[i]);
+        EEPROM.put(3 * sizeof(uint16_t) + i * sizeof(uint16_t), servoMax[i]);
+    }
+}
+
+void loadServoCalibration() {
+    for (uint8_t i = 0; i < 3; i++) {
+        EEPROM.get(i * sizeof(uint16_t), servoMin[i]);
+        EEPROM.get(3 * sizeof(uint16_t) + i * sizeof(uint16_t), servoMax[i]);
+    }
+}
+
+void displaySaved() {
+    // Show "---" for a short time to indicate save
+    for(uint8_t i = 0; i < 50; i++) {
+        displayDigits('-', '-', '-');
+    }
+    displayDigits(' ', ' ', ' ');
+}
+
+void displayNumber(uint8_t num) {
+    char h = (num >= 100) ? ('0' + num / 100) : ' ';
+    char t = (num >= 10)  ? ('0' + (num / 10) % 10) : ' ';
+    char o = '0' + (num % 10);
+    displayDigits(h, t, o);
+}
+
+bool rotatedPot() {
+    if(abs((int)potValue - (int)lastPotValue) > 5) {
+        return true;
+    }
+    return false;
+}
+
+void displayDigits(char digit1, char digit2, char digit3) {
+    displayDigit(digit1, 0);
+    delay(4);
+    displayDigit(digit2, 1);
+    delay(4);
+    displayDigit(digit3, 2);
+    delay(4);
+}
+
 void displayDigit(char digit, uint8_t digitIndex) {
     digitalWrite(DIGIT_1_PIN, LOW);
     digitalWrite(DIGIT_2_PIN, LOW);
     digitalWrite(DIGIT_3_PIN, LOW);
 
-    digitalWrite(LATCH_PIN, LOW);
-    shiftOut(DATA_PIN, CLOCK_PIN, LSBFIRST, 0xFF); // All segments off
-    digitalWrite(LATCH_PIN, HIGH);
+    outputBits(0xFF); // All segments off
 
     if(digit >= '0' && digit <= '9') {
         uint8_t segments = digitMap[digit - '0'];
-        digitalWrite(LATCH_PIN, LOW);
-        shiftOut(DATA_PIN, CLOCK_PIN, LSBFIRST, ~segments);
-        digitalWrite(LATCH_PIN, HIGH);
+        outputBits(~segments); // Invert segments for common cathode display
+    }else if(digit == 'C') {
+        outputBits(~digitMap[10]); // Display 'C'
+    }else if(digit == '-') {
+        outputBits(~digitMap[11]); // Display '-'
     }else if (digit == ' ') {
-        digitalWrite(LATCH_PIN, LOW);
-        shiftOut(DATA_PIN, CLOCK_PIN, LSBFIRST, 0xFF);
-        digitalWrite(LATCH_PIN, HIGH);
+        outputBits(0xFF); // All segments off
     }
 
     switch (digitIndex) {
@@ -286,6 +358,12 @@ void displayDigit(char digit, uint8_t digitIndex) {
         default:
             return;
     }
+}
+
+void outputBits(uint8_t bits) {
+    digitalWrite(LATCH_PIN, LOW);
+    shiftOut(DATA_PIN, CLOCK_PIN, LSBFIRST, bits);
+    digitalWrite(LATCH_PIN, HIGH);
 }
 
 uint16_t readAveragedPotValue(uint8_t samples) {

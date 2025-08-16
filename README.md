@@ -123,10 +123,14 @@ This project was originally created as a stepping stone towards building a **Hex
 
 ### Fritzing Schematic
 ![Schematic](media/schematic.png)
+
 The 12pin female header demonstrates the 7segment display.
 
 ### Servo Tester Demo
 ![Servo Tester Demo](media/servo_demo.gif)
+
+### Prototype soldered (not fully working yet)
+![Prototype soldered](media/prototype_soldered.jpg)
 
 ---
 
